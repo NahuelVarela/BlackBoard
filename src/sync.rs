@@ -13,6 +13,43 @@ use crate::tuple::Tuple;
 
 pub const SYNC_SLICES: &[&str] = &["core", "cli", "board", "tui", "sync"];
 
+/// Parse slice names (`#<num>/<slice>`) from the `## Slices` table of a
+/// problem MD. Only rows inside the `## Slices` section count, so decoys like
+/// `bb pick #1/<slice>` in the workflow docs are ignored.
+/// Returns e.g. `["filter","tabs","cli","e2e","slices"]` for problem 2.
+/// Empty when no table is found (caller falls back to `SYNC_SLICES`).
+pub fn parse_slices_table(text: &str, num: u64) -> Vec<String> {
+    let mut in_section = false;
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(h) = t.strip_prefix("## ") {
+            in_section = h == "Slices" || h.starts_with("Slices ") || h.starts_with("Slices(");
+            continue;
+        }
+        if !in_section || !t.starts_with('|') {
+            continue;
+        }
+        for cell in t.split('|').map(str::trim) {
+            let rest = match cell.strip_prefix('#') {
+                Some(r) => r,
+                None => continue,
+            };
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.parse::<u64>().ok() != Some(num) {
+                continue;
+            }
+            if let Some(slice) = rest[digits.len()..].strip_prefix('/') {
+                let slice = slice.trim();
+                if !slice.is_empty() && !out.iter().any(|s| s == slice) {
+                    out.push(slice.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct Frontmatter {
     pub issue: Option<u64>,
@@ -207,11 +244,18 @@ pub fn sync_file(store: &Store, md_path: &Path, offline: bool) -> Result<u64> {
         store.append(&t, true)?;
     }
 
-    // Assert slice-open for the 5 slices (idempotent: skip ids already present).
+    // Assert slice-open for the problem's slices (idempotent: skip ids already present).
+    // Slice IDs come from the MD's Slices table; hardcoded set is fallback only.
+    let table = parse_slices_table(&text, num);
+    let slices: Vec<String> = if table.is_empty() {
+        SYNC_SLICES.iter().map(|s| s.to_string()).collect()
+    } else {
+        table
+    };
     let existing_ids: std::collections::HashSet<String> =
         store.all_current()?.into_iter().map(|t| t.id).collect();
-    for s in SYNC_SLICES {
-        let id = format!("#{}{}", num, format!("/{}", s));
+    for s in &slices {
+        let id = format!("#{num}/{s}");
         if existing_ids.contains(&id) {
             continue;
         }
@@ -245,5 +289,18 @@ mod tests {
     fn frontmatter_hash_number() {
         let doc = "---\nissue: 12 # filled by sync\n---\n\n# T\n";
         assert_eq!(parse_frontmatter(doc).unwrap().issue, Some(12));
+    }
+
+    #[test]
+    fn slices_table_parsing() {
+        let doc = "---\nissue: null\n---\n\n# #2 — Tabs\n\n## Slices (work items)\n\n\
+            | Slice | ID | State | Actor | Summary |\n\
+            |-------|----|-------|-------|---------|\n\
+            | Foo | #2/filter | [ ] open | — | — |\n\
+            | Bar | #2/tabs | [ ] open | — | — |\n\n\
+            ## Agent workflow\n\n`bb pick #2/<slice> --by agent-1` and `{\"id\":\"#9/nope\"}`.\n";
+        assert_eq!(parse_slices_table(doc, 2), vec!["filter".to_string(), "tabs".to_string()]);
+        // no Slices section -> empty (caller falls back to SYNC_SLICES)
+        assert!(parse_slices_table("# Just a doc\n", 2).is_empty());
     }
 }

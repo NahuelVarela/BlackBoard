@@ -1,5 +1,5 @@
 ---
-issue: null # filled by `bb sync` — if null, sync creates a GitHub issue; if set, sync updates it
+issue: 2
 ---
 
 # #2 — TUI open/closed tabs (finish the done-loop)
@@ -33,6 +33,8 @@ Must-haves for #2:
 4. Empty states: Open-empty shows `(empty — everything is done)`; Closed-empty shows `(empty — nothing closed yet)`.
 5. CLI parity: `bb board [--open|--closed]` prints the matching tab's content; `bb tui --once [--tab open|closed]` snapshots it for CI.
 6. No git on the read path (still). `--explain` keeps proving `git=none`.
+7. `bb sync` parses slice IDs from this file's Slices table instead of the
+   hardcoded core/cli/board/tui/sync set (fallback only when no table found).
 
 Non-goals for #2:
 - No third tab (e.g. separate `Blocked`), no search/filter box, no sorting options, no mouse support.
@@ -47,6 +49,7 @@ Non-goals for #2:
 | Tab bar UI + keybindings + counts (ratatui) | #2/tabs | [ ] open | — | — |
 | CLI parity (`board --open/--closed`, `tui --once --tab`) | #2/cli | [ ] open | — | — |
 | E2E: mixed board + tab snapshots + empty states | #2/e2e | [ ] open | — | — |
+| Sync reads slice IDs from Slices table (no hardcoded set) | #2/slices | [ ] open | — | — |
 
 Example desired TUI for #1's board (all done) once worked:
 
@@ -96,9 +99,12 @@ is untouched. #2 adds zero tuple types and zero writes.
 `bb show` / `pick` / `state` / `done` work exactly as in #1. Tab selection
 never affects writes.
 
-## Deterministic sync (unchanged)
+## Deterministic sync (table-parsed slices)
 
-`bb sync` behavior is untouched. It still NEVER commits code.
+`bb sync` still NEVER commits code. Change for #2: slice-open asserts come
+from this file's Slices table (`#2/...` IDs under `## Slices`); the hardcoded
+core/cli/board/tui/sync set is only a fallback when no table is found.
+(This fixes #2's board showing #1's slice names after the first sync.)
 
 ## Tech decisions (decided)
 
@@ -119,15 +125,18 @@ Rust, `clap v4`, `rusqlite{bundled}`, local-only: all carried over from #1.
 - [ ] `bb board --open` / `--closed` output equals the corresponding `bb tui --once --tab ...` content.
 - [ ] `bb board` (no flags) output unchanged from #1.
 - [ ] `--explain` still proves indexer-only reads; e2e extended in `tests/e2e_two_agents.sh` (or `e2e_tabs.sh`).
+- [ ] `bb sync` on this file asserts exactly the table's slices
+  (filter/tabs/cli/e2e/slices); stale pre-fix ids retired with explanatory summaries.
 - [ ] `cargo test` + `cargo build --release` green.
 
 ## For the planner (next agent)
 
 Input: this file only + repo listing (+ #1's plan for context, not as input).
 Output: `docs/plans/yyyy-mm-dd-002-plan.md` with task breakdown per slice
-(filter/tabs/cli/e2e), file layout deltas (`src/board.rs` partition helper,
-`src/tui.rs` tab state + keybindings, `src/cli.rs` flags), test plan (unit:
-partition correctness incl. blocked∈open; genuine e2e: mixed board fixture,
+(filter/tabs/cli/e2e/slices), file layout deltas (`src/board.rs` partition helper,
+`src/tui.rs` tab state + keybindings, `src/cli.rs` flags, `src/sync.rs` Slices-table
+parser), test plan (unit:
+partition correctness incl. blocked∈open, table parsing incl. decoy `#N/x` outside `## Slices`; genuine e2e: mixed board fixture,
 `--once --tab` snapshots, empty-state strings), and what is deferred
 (third tab, search/sort, mouse, in-TUI transitions). Commit plan before
 implementing (per Talwrn DevApproach). Dogfood fixture: #1's real board,
