@@ -1,5 +1,5 @@
 ---
-issue: null # filled by `bb sync` — if null, sync creates a GitHub issue; if set, sync updates it
+issue: 1
 ---
 
 # #1 — Blackboard CLI MVP (token-efficient issue-driven coordination)
