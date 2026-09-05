@@ -17,6 +17,63 @@ pub fn glyph(state: &str) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Open,
+    Closed,
+}
+
+pub fn is_open_state(state: &str) -> bool {
+    matches!(state, "open" | "planning" | "executing" | "blocked")
+}
+
+pub const LEGEND: &str = "Legend: [ ] open, [.] planning, [~] executing, [x] done, [!] blocked.";
+pub const OPEN_EMPTY: &str = "(empty — everything is done)";
+pub const CLOSED_EMPTY: &str = "(empty — nothing closed yet)";
+
+/// Partition a problem's slices into (open, closed), preserving order.
+/// Open = `open|planning|executing|blocked`; Closed = `done`.
+pub fn partition_open_closed(slices: &[SliceView]) -> (Vec<&SliceView>, Vec<&SliceView>) {
+    let mut open = Vec::new();
+    let mut closed = Vec::new();
+    for s in slices {
+        if is_open_state(&s.state) {
+            open.push(s);
+        } else {
+            closed.push(s);
+        }
+    }
+    (open, closed)
+}
+
+/// Global slice counts across all problems: (open, closed).
+pub fn tab_counts(views: &[ProblemView]) -> (usize, usize) {
+    let mut open = 0;
+    let mut closed = 0;
+    for p in views {
+        let (o, c) = partition_open_closed(&p.slices);
+        open += o.len();
+        closed += c.len();
+    }
+    (open, closed)
+}
+
+fn render_slice_line(s: &SliceView) -> String {
+    let summary = if s.summary.trim().is_empty() && s.state == "open" {
+        "waiting pick".to_string()
+    } else {
+        s.summary.clone()
+    };
+    format!(
+        "  {} {:<8} {:<8} {}  \"{}\"",
+        glyph(&s.state),
+        s.slice,
+        s.state,
+        if s.actor.is_empty() { "—" } else { &s.actor },
+        summary
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct SliceView {
     pub slice: String,
@@ -37,19 +94,30 @@ impl ProblemView {
     pub fn render(&self) -> Vec<String> {
         let mut lines = vec![format!("#{} {}", self.num, self.slug)];
         for s in &self.slices {
-            let summary = if s.summary.trim().is_empty() && s.state == "open" {
-                "waiting pick".to_string()
-            } else {
-                s.summary.clone()
+            lines.push(render_slice_line(s));
+        }
+        lines.push(format!("  refs: {}", self.refs_line));
+        lines
+    }
+
+    #[allow(dead_code)]
+    pub fn render_filtered(&self, tab: Tab) -> Vec<String> {
+        let (open, closed) = partition_open_closed(&self.slices);
+        let picked: &[&SliceView] = match tab {
+            Tab::Open => &open,
+            Tab::Closed => &closed,
+        };
+        let mut lines = vec![format!("#{} {}", self.num, self.slug)];
+        if picked.is_empty() {
+            let msg = match tab {
+                Tab::Open => OPEN_EMPTY,
+                Tab::Closed => CLOSED_EMPTY,
             };
-            lines.push(format!(
-                "  {} {:<8} {:<8} {}  \"{}\"",
-                glyph(&s.state),
-                s.slice,
-                s.state,
-                if s.actor.is_empty() { "—" } else { &s.actor },
-                summary
-            ));
+            lines.push(format!("  {msg}"));
+        } else {
+            for s in picked {
+                lines.push(render_slice_line(s));
+            }
         }
         lines.push(format!("  refs: {}", self.refs_line));
         lines
@@ -161,17 +229,56 @@ pub fn render_show(store: &Store, num: u64) -> anyhow::Result<Vec<String>> {
     }
 }
 
+#[allow(dead_code)]
 pub fn render_board(store: &Store) -> anyhow::Result<Vec<String>> {
+    render_board_filtered(store, None)
+}
+
+pub fn render_board_filtered(store: &Store, tab: Option<Tab>) -> anyhow::Result<Vec<String>> {
     let all = store.all_current()?;
     let views = projection(&all);
     if views.is_empty() {
         return Ok(vec!["(empty board — run `bb sync <file>` first)".to_string()]);
     }
-    let mut lines = vec!["Legend: [ ] open, [.] planning, [~] executing, [x] done, [!] blocked.".to_string()];
-    for p in &views {
-        lines.extend(p.render());
+    match tab {
+        None => {
+            let mut lines = vec![LEGEND.to_string()];
+            for p in &views {
+                lines.extend(p.render());
+            }
+            Ok(lines)
+        }
+        Some(t) => {
+            // Tab view: only problems with at least one slice in this tab.
+            // Fully-closed problems disappear from Open; fully-open disappear from Closed.
+            // Legend goes at the bottom.
+            let mut lines: Vec<String> = Vec::new();
+            for p in &views {
+                let (open, closed) = partition_open_closed(&p.slices);
+                let picked: &[&SliceView] = match t {
+                    Tab::Open => &open,
+                    Tab::Closed => &closed,
+                };
+                if picked.is_empty() {
+                    continue;
+                }
+                lines.push(format!("#{} {}", p.num, p.slug));
+                for s in picked {
+                    lines.push(render_slice_line(s));
+                }
+                lines.push(format!("  refs: {}", p.refs_line));
+            }
+            if lines.is_empty() {
+                let msg = match t {
+                    Tab::Open => OPEN_EMPTY,
+                    Tab::Closed => CLOSED_EMPTY,
+                };
+                lines.push(format!("  {msg}"));
+            }
+            lines.push(LEGEND.to_string());
+            Ok(lines)
+        }
     }
-    Ok(lines)
 }
 
 #[cfg(test)]
@@ -199,5 +306,50 @@ mod tests {
         assert!(lines[0] == "#1 blackboard-cli");
         assert!(lines.iter().any(|l| l.contains("[ ]") && l.contains("core")));
         assert!(lines.iter().any(|l| l.contains("[ ]") && l.contains("cli")));
+    }
+
+    fn sv(slice: &str, state: &str) -> SliceView {
+        SliceView { slice: slice.into(), state: state.into(), actor: "a".into(), summary: "".into() }
+    }
+
+    #[test]
+    fn partition_blocked_is_open_done_is_closed() {
+        let v = vec![
+            sv("a", "open"),
+            sv("b", "planning"),
+            sv("c", "executing"),
+            sv("d", "blocked"),
+            sv("e", "done"),
+        ];
+        let (open, closed) = partition_open_closed(&v);
+        assert_eq!(open.len(), 4);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].slice, "e");
+        // order preserved
+        assert_eq!(open.iter().map(|s| s.slice.as_str()).collect::<Vec<_>>(), vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn filtered_empty_states() {
+        let p = ProblemView {
+            num: 1,
+            slug: "x".into(),
+            slices: vec![sv("a", "done")],
+            refs_line: "r".into(),
+        };
+        let open_lines = p.render_filtered(Tab::Open);
+        assert!(open_lines.iter().any(|l| l.contains(OPEN_EMPTY)));
+        assert!(!open_lines.iter().any(|l| l.contains("[x]")));
+        let closed_lines = p.render_filtered(Tab::Closed);
+        assert!(closed_lines.iter().any(|l| l.contains("[x]")));
+
+        let q = ProblemView {
+            num: 3,
+            slug: "y".into(),
+            slices: vec![sv("b", "open")],
+            refs_line: "r".into(),
+        };
+        let closed_empty = q.render_filtered(Tab::Closed);
+        assert!(closed_empty.iter().any(|l| l.contains(CLOSED_EMPTY)));
     }
 }

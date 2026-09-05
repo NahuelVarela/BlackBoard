@@ -54,7 +54,14 @@ pub enum Command {
         id: String,
     },
     /// Show all problems' ticks (same projection as TUI).
-    Board,
+    Board {
+        /// Show only open slices (open|planning|executing|blocked).
+        #[arg(long, conflicts_with = "closed")]
+        open: bool,
+        /// Show only closed (done) slices.
+        #[arg(long, conflicts_with = "open")]
+        closed: bool,
+    },
     /// Deterministic sync: .MD -> GitHub issue create-or-update + blackboard asserts. NEVER commits code.
     Sync {
         /// Problem markdown file, e.g. `problems/001-blackboard-cli.md`.
@@ -71,5 +78,8 @@ pub enum Command {
         /// Poll interval in ms for watch mode.
         #[arg(long, default_value = "1000")]
         watch_ms: u64,
+        /// Narrow `--once` (or initial tab) to one tab: open|closed.
+        #[arg(long, value_parser = ["open", "closed"])]
+        tab: Option<String>,
     },
 }

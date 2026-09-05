@@ -85,8 +85,15 @@ fn main() -> Result<()> {
                 explain(&store);
             }
         }
-        Command::Board => {
-            for line in board::render_board(&store)? {
+        Command::Board { open, closed } => {
+            let tab = if *open {
+                Some(board::Tab::Open)
+            } else if *closed {
+                Some(board::Tab::Closed)
+            } else {
+                None
+            };
+            for line in board::render_board_filtered(&store, tab)? {
                 println!("{line}");
             }
             if cli.explain {
@@ -100,11 +107,17 @@ fn main() -> Result<()> {
                 explain(&store);
             }
         }
-        Command::Tui { once, watch_ms } => {
+        Command::Tui { once, watch_ms, tab } => {
+            let t = match tab.as_deref() {
+                Some("open") => Some(board::Tab::Open),
+                Some("closed") => Some(board::Tab::Closed),
+                Some(other) => anyhow::bail!("unknown --tab {other:?} (open|closed)"),
+                None => None,
+            };
             if *once {
-                println!("{}", tui::run_once(&store)?);
+                println!("{}", tui::run_once(&store, t)?);
             } else {
-                tui::run_interactive(&store, *watch_ms)?;
+                tui::run_interactive(&store, *watch_ms, t)?;
             }
         }
     }
