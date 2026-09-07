@@ -26,6 +26,9 @@ impl Store {
     pub fn dir(&self) -> PathBuf {
         self.root.join(".blackboard")
     }
+    pub fn pending_dir(&self) -> PathBuf {
+        self.dir().join("pending")
+    }
     pub fn log_path(&self) -> PathBuf {
         self.dir().join(LOG_NAME)
     }
@@ -39,6 +42,8 @@ impl Store {
         if !self.log_path().exists() {
             fs::write(self.log_path(), "").context("create log.jsonl")?;
         }
+        // Pending sidecars for `bb dispatch` question surfacing.
+        fs::create_dir_all(self.pending_dir()).ok();
         let conn = self.open_db()?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS current(
@@ -49,9 +54,17 @@ impl Store {
                  summary TEXT NOT NULL,
                  ts TEXT NOT NULL,
                  refs TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS reports(
+                 id TEXT PRIMARY KEY,
+                 actor TEXT NOT NULL,
+                 summary TEXT NOT NULL,
+                 ts TEXT NOT NULL,
+                 refs TEXT NOT NULL,
+                 extra TEXT NOT NULL
              );",
         )
-        .context("create index table")?;
+        .context("create index tables")?;
         Ok(())
     }
 
@@ -62,6 +75,8 @@ impl Store {
 
     /// Append one tuple: validate, write JSONL, upsert indexer if newer.
     /// `allow_open=true` only for `bb sync`.
+    /// `run-report` rows go to the separate `reports` table so they never
+    /// clobber the tick in `current` (same `id` as the slice by design).
     pub fn append(&self, t: &Tuple, allow_open: bool) -> Result<()> {
         t.validate(allow_open).map_err(|e| anyhow::anyhow!(e))?;
         self.init()?;
@@ -73,7 +88,11 @@ impl Store {
         let line = serde_json::to_string(t).unwrap();
         writeln!(f, "{line}").context("append tuple")?;
         f.flush().ok();
-        self.upsert_if_newer(t)
+        if t.r#type == "run-report" {
+            self.upsert_report_if_newer(t)
+        } else {
+            self.upsert_if_newer(t)
+        }
     }
 
     fn upsert_if_newer(&self, t: &Tuple) -> Result<()> {
@@ -91,6 +110,7 @@ impl Store {
                         ts: row.get(5)?,
                         refs: serde_json::from_str::<Vec<String>>(row.get::<_, String>(6)?.as_str())
                             .unwrap_or_default(),
+                        extra: None,
                     })
                 })
                 .ok()
@@ -120,6 +140,55 @@ impl Store {
         Ok(())
     }
 
+    /// Route `run-report` rows to their own table (keyed by slice id).
+    /// Latest wins by (ts, actor), same rule as ticks.
+    fn upsert_report_if_newer(&self, t: &Tuple) -> Result<()> {
+        let conn = self.open_db()?;
+        let existing: Option<Tuple> = conn
+            .prepare("SELECT id,actor,summary,ts,refs,extra FROM reports WHERE id=?1")
+            .map(|mut st| {
+                st.query_row([&t.id], |row| {
+                    let extra_s: String = row.get(5)?;
+                    Ok(Tuple {
+                        id: row.get(0)?,
+                        r#type: "run-report".to_string(),
+                        state: "done".to_string(),
+                        actor: row.get(1)?,
+                        summary: row.get(2)?,
+                        ts: row.get(3)?,
+                        refs: serde_json::from_str::<Vec<String>>(row.get::<_, String>(4)?.as_str())
+                            .unwrap_or_default(),
+                        extra: serde_json::from_str(&extra_s).ok(),
+                    })
+                })
+                .ok()
+            })
+            .unwrap_or(None);
+        let newer = match existing {
+            None => true,
+            Some(ref e) => current([e, t]).map(|w| w.ts == t.ts && w.actor == t.actor).unwrap_or(true),
+        };
+        if newer {
+            let extra_s = serde_json::to_string(t.extra.as_ref().unwrap_or(&serde_json::Value::Null))
+                .unwrap_or_else(|_| "null".to_string());
+            conn.execute(
+                "INSERT INTO reports(id,actor,summary,ts,refs,extra) VALUES(?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(id) DO UPDATE SET actor=excluded.actor,summary=excluded.summary,
+                   ts=excluded.ts,refs=excluded.refs,extra=excluded.extra",
+                params![
+                    t.id,
+                    t.actor,
+                    t.summary,
+                    t.ts,
+                    serde_json::to_string(&t.refs).unwrap(),
+                    extra_s,
+                ],
+            )
+            .context("upsert report")?;
+        }
+        Ok(())
+    }
+
     /// Replay full JSONL log into the indexer (recovery path).
     #[allow(dead_code)]
     pub fn rebuild(&self) -> Result<usize> {
@@ -127,6 +196,7 @@ impl Store {
         let data = fs::read_to_string(self.log_path()).unwrap_or_default();
         let conn = self.open_db()?;
         conn.execute("DELETE FROM current", []).ok();
+        conn.execute("DELETE FROM reports", []).ok();
         drop(conn);
         let mut n = 0;
         for line in data.lines() {
@@ -135,7 +205,11 @@ impl Store {
                 continue;
             }
             let t: Tuple = serde_json::from_str(line).context("parse log line")?;
-            self.upsert_if_newer(&t)?;
+            if t.r#type == "run-report" {
+                self.upsert_report_if_newer(&t)?;
+            } else {
+                self.upsert_if_newer(&t)?;
+            }
             n += 1;
         }
         Ok(n)
@@ -158,6 +232,7 @@ impl Store {
                 ts: row.get(5)?,
                 refs: serde_json::from_str::<Vec<String>>(row.get::<_, String>(6)?.as_str())
                     .unwrap_or_default(),
+                extra: None,
             })
         })?;
         let mut out = Vec::new();
@@ -165,6 +240,38 @@ impl Store {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// Read-only: all run-reports (indexer only, never git).
+    pub fn all_reports(&self) -> Result<Vec<Tuple>> {
+        if !self.db_path().exists() {
+            return Ok(vec![]);
+        }
+        let conn = Connection::open(self.db_path()).context("open index.db readonly")?;
+        let mut st = conn.prepare("SELECT id,actor,summary,ts,refs,extra FROM reports ORDER BY id")?;
+        let rows = st.query_map([], |row| {
+            let extra_s: String = row.get(5)?;
+            Ok(Tuple {
+                id: row.get(0)?,
+                r#type: "run-report".to_string(),
+                state: "done".to_string(),
+                actor: row.get(1)?,
+                summary: row.get(2)?,
+                ts: row.get(3)?,
+                refs: serde_json::from_str::<Vec<String>>(row.get::<_, String>(4)?.as_str())
+                    .unwrap_or_default(),
+                extra: serde_json::from_str(&extra_s).ok(),
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn report_for(&self, id: &str) -> Result<Option<Tuple>> {
+        Ok(self.all_reports()?.into_iter().find(|t| t.id == id))
     }
 
     pub fn row_count(&self) -> usize {
@@ -211,6 +318,30 @@ mod tests {
         s.append(&b, false).unwrap();
         let all = s.all_current().unwrap();
         assert_eq!(all[0].state, "executing");
+        let _ = fs::remove_dir_all(&s.root);
+    }
+
+    #[test]
+    fn report_same_id_does_not_clobber_tick() {
+        let s = tmp_store("report");
+        let tick = Tuple::new("#3/dispatch", "slice-state", "executing", "agent-1", "working", vec!["p".into()]);
+        s.append(&tick, false).unwrap();
+        let rep = Tuple::new("#3/dispatch", "run-report", "done", "agent-1", "session mock-1 ok", vec!["p".into()])
+            .with_extra(serde_json::json!({"session_id": "mock-1", "cost_usd": 0.042}));
+        s.append(&rep, false).unwrap();
+        // Tick intact in current; report in its own table.
+        let cur = s.all_current().unwrap();
+        assert_eq!(cur.len(), 1);
+        assert_eq!(cur[0].r#type, "slice-state");
+        assert_eq!(cur[0].state, "executing");
+        let reps = s.all_reports().unwrap();
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].extra.as_ref().unwrap()["session_id"], "mock-1");
+        // Rebuild preserves both.
+        fs::remove_file(s.db_path()).unwrap();
+        s.rebuild().unwrap();
+        assert_eq!(s.all_current().unwrap().len(), 1);
+        assert_eq!(s.all_reports().unwrap().len(), 1);
         let _ = fs::remove_dir_all(&s.root);
     }
 }

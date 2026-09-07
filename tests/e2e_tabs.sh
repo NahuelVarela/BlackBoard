@@ -47,8 +47,10 @@ diff <("$BB" --repo "$TMP" board) <("$BB" --repo "$TMP" tui --once) || { echo "F
 echo "== full board unchanged shape (5 slices + legend) =="
 "$BB" --repo "$TMP" board | grep -q "^\[.\] open\|Legend" || true
 LINES=$("$BB" --repo "$TMP" board | wc -l)
-# legend(1) + header(1) + 5 slices + refs(1) = 8
-[ "$LINES" -eq 8 ] || { echo "FAIL: full board lines=$LINES want 8"; exit 1; }
+# legend(1) + header(1) + 5 slices + refs(1) + 1 next: for the blocked slice = 9
+[ "$LINES" -eq 9 ] || { echo "FAIL: full board lines=$LINES want 9"; exit 1; }
+# blocked slice carries its actionable next step inline (no guessing)
+"$BB" --repo "$TMP" board | grep -q "next: bb answer\|next: bb dispatch" || { echo "FAIL: blocked next: hint missing"; exit 1; }
 
 echo "== all-done: Open tab shows empty-state =="
 "$BB" --repo "$TMP" done '#1/board' --by agent-1 --summary "Indexer done, verify with bb board." >/dev/null

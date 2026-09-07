@@ -3,14 +3,31 @@
 Blackboard CLI (`bb`) MVP — plan [#1](problems/001-blackboard-cli.md):
 token-efficient issue-driven coordination for humans + agents.
 
-## Build
+## Install
 
 ```sh
-cargo build --release   # single `bb` binary at target/release/bb (~4MB, 5ms-class startup)
+cargo install --path .   # installs `bb` to ~/.cargo/bin, already on PATH for any rustup user
+```
+
+This is the primary, idiomatic path for a single Rust binary — no
+`--manifest-path`, no `cargo run`, no cwd requirement afterward; `bb` is
+then reachable by name from any shell or agent process on the machine.
+
+If `cargo install` isn't available (e.g. an agent sandbox without cargo's
+install directory writable), use the fallback script instead:
+
+```sh
+scripts/install.sh                        # builds + copies to ~/.local/bin/bb
+BB_INSTALL_DIR=/some/other/dir scripts/install.sh   # override install dir
 ```
 
 Requires Rust stable (`rustup`). `rusqlite` uses the `bundled` feature —
-no system SQLite needed.
+no system SQLite needed. Neither install path touches your shell's
+`PATH`/rc files — that's `rustup`'s job, not `bb`'s.
+
+`.blackboard/` lives at your nearest git repo root (walked up from cwd),
+so one `bb` binary serves many repos, each with its own board — run `bb
+help` to see which board you're currently on.
 
 ## Human loop
 
@@ -49,4 +66,7 @@ the ~40-line budget. `bb board` adds one legend line per repo. All reads hit
 - `src/board.rs` — projection shared by CLI and TUI
 - `src/tui.rs` — `ratatui` watch mode (`--once` for CI snapshots)
 - `src/sync.rs` — deterministic `.MD` -> `gh issue` sync (no code commits)
+- `src/namespace.rs` — resolves `.blackboard/`'s root (`--repo` > git walk-up > XDG default)
+- `src/help.rs` — `bb help` / bare `bb`: workflow guide + resolved namespace + install self-check
 - `tests/e2e_two_agents.sh` — genuine e2e: 2 concurrent agents, TUI parity, no-git check
+- `tests/e2e_namespace.sh` — genuine e2e: subdir discovery, no-git default fallback, `--repo` override parity, install script smoke test

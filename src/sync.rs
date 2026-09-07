@@ -13,11 +13,13 @@ use crate::tuple::Tuple;
 
 pub const SYNC_SLICES: &[&str] = &["core", "cli", "board", "tui", "sync"];
 
-/// Parse slice names (`#<num>/<slice>`) from the `## Slices` table of a
-/// problem MD. Only rows inside the `## Slices` section count, so decoys like
-/// `bb pick #1/<slice>` in the workflow docs are ignored.
+/// Parse slice names (`#<num>/<slice>`) from the `## Slices` section of a
+/// problem MD — whether table rows (`| … #2/foo … |`) or a mere bullet list
+/// (`- #2/foo: …`). Only lines inside the `## Slices` section count, so
+/// decoys like `bb pick #1/<slice>` in the workflow docs are ignored.
+/// Slices are a mere list: names/count are opaque, order preserved, deduped.
 /// Returns e.g. `["filter","tabs","cli","e2e","slices"]` for problem 2.
-/// Empty when no table is found (caller falls back to `SYNC_SLICES`).
+/// Empty when no IDs are found (caller falls back to `SYNC_SLICES`).
 pub fn parse_slices_table(text: &str, num: u64) -> Vec<String> {
     let mut in_section = false;
     let mut out: Vec<String> = Vec::new();
@@ -27,27 +29,48 @@ pub fn parse_slices_table(text: &str, num: u64) -> Vec<String> {
             in_section = h == "Slices" || h.starts_with("Slices ") || h.starts_with("Slices(");
             continue;
         }
-        if !in_section || !t.starts_with('|') {
+        if !in_section || t.is_empty() {
             continue;
         }
-        for cell in t.split('|').map(str::trim) {
-            let rest = match cell.strip_prefix('#') {
-                Some(r) => r,
-                None => continue,
-            };
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if digits.parse::<u64>().ok() != Some(num) {
-                continue;
-            }
-            if let Some(slice) = rest[digits.len()..].strip_prefix('/') {
-                let slice = slice.trim();
-                if !slice.is_empty() && !out.iter().any(|s| s == slice) {
-                    out.push(slice.to_string());
-                }
-            }
-        }
+        extract_ids(t, num, &mut out);
     }
     out
+}
+
+/// Scan one line for `#<num>/<slice>` tokens. Slice names are
+/// `[A-Za-z0-9-_]+`; scanning stops at the first other char.
+fn extract_ids(line: &str, num: u64, out: &mut Vec<String>) {
+    let b = line.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'#' {
+            let mut j = i + 1;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 && j < b.len() && b[j] == b'/' {
+                if line[i + 1..j].parse::<u64>().ok() == Some(num) {
+                    let mut k = j + 1;
+                    while k < b.len()
+                        && (b[k].is_ascii_alphanumeric() || b[k] == b'-' || b[k] == b'_')
+                    {
+                        k += 1;
+                    }
+                    if k > j + 1 {
+                        let slice = &line[j + 1..k];
+                        if !out.iter().any(|s| s == slice) {
+                            out.push(slice.to_string());
+                        }
+                        i = k;
+                        continue;
+                    }
+                }
+            }
+            i = j.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -302,5 +325,21 @@ mod tests {
         assert_eq!(parse_slices_table(doc, 2), vec!["filter".to_string(), "tabs".to_string()]);
         // no Slices section -> empty (caller falls back to SYNC_SLICES)
         assert!(parse_slices_table("# Just a doc\n", 2).is_empty());
+    }
+
+    #[test]
+    fn slices_bullet_list_parsing() {
+        let doc = "---\nissue: null\n---\n\n# #3 — X\n\n## Slices\n\n\
+            - #3/dispatch: event loop\n\
+            - #3/blocked: questions\n\
+            - #3/tokens: finish\n\n\
+            ## Agent workflow\n\n`bb pick #3/<slice> --by agent-1`.\n";
+        assert_eq!(
+            parse_slices_table(doc, 3),
+            vec!["dispatch".to_string(), "blocked".to_string(), "tokens".to_string()]
+        );
+        // wrong-problem decoys inside the section are ignored
+        let doc2 = "---\nissue: null\n---\n\n# #3 — X\n\n## Slices\n\n- #9/nope\n- #3/ok\n";
+        assert_eq!(parse_slices_table(doc2, 3), vec!["ok".to_string()]);
     }
 }

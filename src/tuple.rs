@@ -16,6 +16,11 @@ pub struct Tuple {
     pub summary: String,
     pub ts: String,
     pub refs: Vec<String>,
+    /// Machine-readable payload for `run-report` (cost/tokens). `None` for
+    /// all other types. `#[serde(default)]` keeps wire-compat: old readers
+    /// ignore unknown `extra`, new readers round-trip it.
+    #[serde(default)]
+    pub extra: Option<serde_json::Value>,
 }
 
 impl Tuple {
@@ -36,7 +41,13 @@ impl Tuple {
             summary: summary.to_string(),
             ts,
             refs,
+            extra: None,
         }
+    }
+
+    pub fn with_extra(mut self, extra: serde_json::Value) -> Self {
+        self.extra = Some(extra);
+        self
     }
 
     /// Validate per spec rules. `allow_open=false` rejects `open` (agents may
@@ -45,7 +56,10 @@ impl Tuple {
         if self.id.is_empty() {
             return Err("id must not be empty".into());
         }
-        if self.r#type != "slice-state" && self.r#type != "issue-opened" {
+        if self.r#type != "slice-state"
+            && self.r#type != "issue-opened"
+            && self.r#type != "run-report"
+        {
             return Err(format!("unknown type {:?}", self.r#type));
         }
         if self.r#type == "slice-state" && !SLICE_STATES.contains(&self.state.as_str()) {
@@ -70,6 +84,9 @@ impl Tuple {
             if self.refs.is_empty() {
                 return Err("refs MUST link back to the problem file / issue".into());
             }
+        }
+        if self.r#type == "run-report" && self.refs.is_empty() {
+            return Err("run-report refs MUST link back to the problem file / issue".into());
         }
         Ok(())
     }
@@ -127,6 +144,7 @@ mod tests {
             summary: summary.into(),
             ts: ts.into(),
             refs: vec!["problems/001-blackboard-cli.md".into()],
+            extra: None,
         }
     }
 
@@ -162,5 +180,24 @@ mod tests {
         assert_eq!(problem_of("nope"), None);
         assert_eq!(slice_of("#1/core"), Some("core".into()));
         assert_eq!(slice_of("#1"), None);
+    }
+
+    #[test]
+    fn run_report_accepted_with_refs() {
+        let mut r = t("#3/dispatch", "done", "agent-1", "2026-09-05T12:00:00Z", "session abc ok");
+        r.r#type = "run-report".into();
+        r.extra = Some(serde_json::json!({"session_id": "abc", "cost_usd": 0.042}));
+        assert!(r.validate(false).is_ok());
+        let mut bad = r.clone();
+        bad.refs.clear();
+        assert!(bad.validate(false).is_err());
+    }
+
+    #[test]
+    fn run_report_wire_compat_extra_defaults_none() {
+        // Old log lines without `extra` still parse.
+        let line = r##"{"id":"#3/dispatch","type":"run-report","state":"done","actor":"agent-1","summary":"s","ts":"2026-09-05T12:00:00Z","refs":["p"]}"##;
+        let r: Tuple = serde_json::from_str(line).unwrap();
+        assert_eq!(r.extra, None);
     }
 }

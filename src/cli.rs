@@ -2,9 +2,15 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "bb", version, about = "Blackboard CLI — token-efficient issue-driven coordination")]
+#[command(
+    name = "bb",
+    version,
+    about = "Blackboard CLI — token-efficient issue-driven coordination",
+    after_help = "Run 'bb help' for the full guide.",
+    disable_help_subcommand = true
+)]
 pub struct Cli {
-    /// Repo root (contains `.blackboard/`). Defaults to current dir.
+    /// Repo root (contains `.blackboard/`). Defaults to nearest git root.
     #[arg(long, global = true)]
     pub repo: Option<String>,
 
@@ -13,11 +19,13 @@ pub struct Cli {
     pub explain: bool,
 
     #[command(subcommand)]
-    pub cmd: Command,
+    pub cmd: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Full usage guide: workflow, verbs, and your current namespace.
+    Help,
     /// Create `.blackboard/log.jsonl` + `index.db` (idempotent).
     Init,
     /// Pick 1 slice: asserts `planning`. One slice per agent.
@@ -81,5 +89,64 @@ pub enum Command {
         /// Narrow `--once` (or initial tab) to one tab: open|closed.
         #[arg(long, value_parser = ["open", "closed"])]
         tab: Option<String>,
+    },
+    /// Dispatch a Claude Code agent on one slice; board ticks itself.
+    Dispatch {
+        /// Slice id, e.g. `#3/dispatch`.
+        id: String,
+        /// Actor name, e.g. `agent-1`.
+        #[arg(long)]
+        by: String,
+        /// Prompt for the agent. Defaults to `bb show` slice context.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Resume a previous session instead of starting a new one.
+        #[arg(long)]
+        resume: Option<String>,
+        /// Override the `claude` binary (tests: path to a mock shim).
+        #[arg(long)]
+        mock_bin: Option<String>,
+        /// Passthrough for `claude --allowedTools`.
+        #[arg(long)]
+        allow_tools: Option<String>,
+        /// Model for the agent (passthrough for `claude --model`).
+        /// Cheap default: dispatches run on sonnet unless overridden.
+        #[arg(long, default_value = "sonnet")]
+        model: String,
+    },
+    /// Answer a pending AskUserQuestion for a dispatched slice.
+    Answer {
+        /// Slice id, e.g. `#3/dispatch`.
+        id: String,
+        /// Actor name answering.
+        #[arg(long)]
+        by: String,
+        /// Option label for the (single) pending question.
+        #[arg(long, conflicts_with_all = ["text", "all_json"])]
+        pick: Option<String>,
+        /// Free-text answer for the (single) pending question.
+        #[arg(long, conflicts_with_all = ["pick", "all_json"])]
+        text: Option<String>,
+        /// JSON object mapping question text -> label (multi-question).
+        #[arg(long, conflicts_with_all = ["pick", "text"])]
+        all_json: Option<String>,
+    },
+    /// Show the dispatch log tail for one slice (e.g. `#4/hello`).
+    /// Reads `.blackboard/dispatch-<N>-<slice>.log` — the same file the TUI points at.
+    Log {
+        /// Slice id, e.g. `#4/hello`.
+        id: String,
+        /// How many trailing lines to show.
+        #[arg(long, default_value = "20")]
+        lines: usize,
+    },
+    /// Hook helper invoked by claude as a PreToolUse hook
+    /// (matcher AskUserQuestion, via `bb dispatch --settings`). Prints
+    /// the hook decision JSON (allow + updatedInput once answered).
+    #[command(hide = true)]
+    ClaudeHook {
+        /// Slice id the question belongs to, e.g. `#3/dispatch`.
+        #[arg(long)]
+        slice: String,
     },
 }

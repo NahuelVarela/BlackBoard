@@ -1,0 +1,34 @@
+{
+  "total_events": 40,
+  "unique_users": 8,
+  "revenue_cents": 19994,
+  "by_event_type": {
+    "page_view": 13,
+    "click": 9,
+    "signup": 13,
+    "purchase": 5
+  },
+  "top_pages": [
+    {
+      "page": "/about",
+      "count": 8
+    },
+    {
+      "page": "/checkout",
+      "count": 8
+    },
+    {
+      "page": "/signup",
+      "count": 8
+    },
+    {
+      "page": "/home",
+      "count": 6
+    },
+    {
+      "page": "/docs",
+      "count": 5
+    }
+  ],
+  "generated_at": "2026-09-05T13:35:04Z"
+}

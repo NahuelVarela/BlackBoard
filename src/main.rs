@@ -3,7 +3,11 @@
 //! Local-first: all reads hit `.blackboard/index.db`. No `git` subprocess
 //! anywhere on the read or write path.
 mod board;
+mod claude;
 mod cli;
+mod dispatch;
+mod help;
+mod namespace;
 mod store;
 mod sync;
 mod tui;
@@ -18,14 +22,8 @@ use cli::{Cli, Command};
 use store::Store;
 use tuple::Tuple;
 
-fn repo_root(flag: &Option<String>) -> Result<PathBuf> {
-    if let Some(r) = flag {
-        return Ok(PathBuf::from(r));
-    }
-    Ok(std::env::current_dir().context("current dir")?)
-}
-
-fn explain(store: &Store) {
+fn explain(store: &Store, ns: &namespace::Namespace) {
+    println!("namespace: {} ({})", ns.root.display(), ns.origin.describe());
     println!(
         "explain: reads={} rows={} git=none",
         store.db_path().display(),
@@ -35,15 +33,21 @@ fn explain(store: &Store) {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let root = repo_root(&cli.repo)?;
-    let store = Store::new(&root);
+    let ns = namespace::resolve(&cli.repo)?;
+    let store = Store::new(&ns.root);
+    let cmd = cli.cmd.as_ref().unwrap_or(&Command::Help);
 
-    match &cli.cmd {
+    match cmd {
+        Command::Help => {
+            for line in help::render_help(&ns) {
+                println!("{line}");
+            }
+        }
         Command::Init => {
             store.init()?;
             println!("init: {} (empty board)", store.dir().display());
             if cli.explain {
-                explain(&store);
+                explain(&store, &ns);
             }
         }
         Command::Pick { id, by } => {
@@ -82,7 +86,7 @@ fn main() -> Result<()> {
                 println!("{line}");
             }
             if cli.explain {
-                explain(&store);
+                explain(&store, &ns);
             }
         }
         Command::Board { open, closed } => {
@@ -97,14 +101,14 @@ fn main() -> Result<()> {
                 println!("{line}");
             }
             if cli.explain {
-                explain(&store);
+                explain(&store, &ns);
             }
         }
         Command::Sync { file, offline } => {
             let n = sync::sync_file(&store, &PathBuf::from(file), *offline)?;
             println!("sync: issue #{} (frontmatter + blackboard updated, no code committed)", n);
             if cli.explain {
-                explain(&store);
+                explain(&store, &ns);
             }
         }
         Command::Tui { once, watch_ms, tab } => {
@@ -119,6 +123,40 @@ fn main() -> Result<()> {
             } else {
                 tui::run_interactive(&store, *watch_ms, t)?;
             }
+        }
+        Command::Dispatch { id, by, prompt, resume, mock_bin, allow_tools, model } => {
+            dispatch::run_dispatch(
+                &store,
+                id,
+                by,
+                prompt.as_deref(),
+                resume.as_deref(),
+                mock_bin.as_deref(),
+                allow_tools.as_deref(),
+                model,
+            )?;
+        }
+        Command::Answer { id, by, pick, text, all_json } => {
+            dispatch::run_answer(
+                &store,
+                id,
+                by,
+                pick.as_deref(),
+                text.as_deref(),
+                all_json.as_deref(),
+            )?;
+            if cli.explain {
+                explain(&store, &ns);
+            }
+        }
+        Command::Log { id, lines } => {
+            dispatch::run_log(&store, id, *lines)?;
+            if cli.explain {
+                explain(&store, &ns);
+            }
+        }
+        Command::ClaudeHook { slice } => {
+            dispatch::run_claude_hook(&store, slice)?;
         }
     }
     Ok(())
